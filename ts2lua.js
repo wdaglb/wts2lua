@@ -1,16 +1,24 @@
-const esprima = require('esprima')
 const fs = require('fs')
 const path = require('path')
-const arrayParse = require('./src/array')
+const { parse } = require('@babel/core')
+const arrayParse = require("./array");
+const { glob } = require('glob')
+const watch = require('watch')
 
 const AST = {
     Program: 'Program',
     Identifier: 'Identifier',
+    NumericLiteral: 'NumericLiteral',
+    StringLiteral: 'StringLiteral',
+    ObjectProperty: 'ObjectProperty',
     Literal: 'Literal',
     Property: 'Property',
     AssignmentPattern: 'AssignmentPattern',
     AssignmentExpression: 'AssignmentExpression',
     VariableDeclaration: 'VariableDeclaration',
+    ImportDeclaration: 'ImportDeclaration',
+    ImportDefaultSpecifier: 'ImportDefaultSpecifier',
+    ImportSpecifier: 'ImportSpecifier',
     ArrowFunctionExpression: 'ArrowFunctionExpression',
     FunctionExpression: 'FunctionExpression',
     FunctionDeclaration: 'FunctionDeclaration',
@@ -26,19 +34,30 @@ const AST = {
     NewExpression: 'NewExpression',
     ReturnStatement: 'ReturnStatement',
     BlockStatement: 'BlockStatement',
+    IfStatement: 'IfStatement',
+    ForStatement: 'ForStatement',
+    ForInStatement: 'ForInStatement',
+    ForOfStatement: 'ForOfStatement',
+    WhileStatement: 'WhileStatement',
+    DoWhileStatement: 'DoWhileStatement',
+    BreakStatement: 'BreakStatement',
     UnaryExpression: 'UnaryExpression',
     ObjectExpression: 'ObjectExpression',
+    ObjectMethod: 'ObjectMethod',
+    LogicalExpression: 'LogicalExpression',
+    ExportDefaultDeclaration: 'ExportDefaultDeclaration',
+    ExportNamedDeclaration: 'ExportNamedDeclaration',
 }
-const KIND = {
-    const: 'const',
-}
-
 // lua抽象树
 class LuaAst {
     start = []
     codes = []
     _libs = []
-    constructor() {
+    ident = 0
+    constructor(location) {
+        this.ident = 0
+        // console.log('type', location)
+        // this.ident = location?.start?.column ?? 0
     }
 
     addStart (code) {
@@ -50,7 +69,7 @@ class LuaAst {
      * @param code
      */
     push (code) {
-        this.codes.push(code)
+        this.codes.push(this._parseIdent() + code)
     }
 
     /**
@@ -69,6 +88,31 @@ class LuaAst {
         }
     }
 
+    /**
+     * 加载包.
+     */
+    load (file, name) {
+        if (this._libs.includes(file)) {
+            return
+        }
+        this._libs.push(file)
+        const requireStr = `require("${file}")`
+        if (name) {
+            this.codes.unshift(`local ${name} = ${requireStr}`)
+        } else {
+            this.codes.unshift(`${requireStr}`)
+        }
+    }
+
+    // 缩进
+    _parseIdent () {
+        let val = ''
+        for (let i = 0; i < this.ident; i++) {
+            val += ' '
+        }
+        return val
+    }
+
     toString () {
         let pre = ""
         if (this.start.length) {
@@ -78,7 +122,7 @@ class LuaAst {
     }
 }
 
-class Js2Ast {
+class Ts2Ast {
     luaAST;
 
     // 别名组
@@ -87,13 +131,27 @@ class Js2Ast {
     _use_class = false;
     // 数据类型
     _var_types = {};
+    // 源目录
+    _dest_path = '';
+    // 输出目录
+    _output_path = '';
 
-    constructor(code) {
+    buildCode (code) {
         this.luaAST = new LuaAst()
-        const nodes = esprima.parseScript(code)
+        const nodes = parse(code).program
         if (nodes.type === AST.Program) {
-            this._parsePrograms(nodes.body)
+            this._parsePrograms(nodes.body, {
+                indent: 0,
+            })
         }
+    }
+
+    setDest (dir) {
+        this._dest_path = dir
+    }
+
+    setOutput (dir) {
+        this._output_path = dir
     }
 
     _parsePrograms (programs, options) {
@@ -114,12 +172,33 @@ class Js2Ast {
 
     _parseKind (ast, options) {
         let res
+        if (! ast) {
+            return ''
+        }
         switch (ast.type) {
             case AST.VariableDeclaration:
-                res = this._parseKingConst(ast.declarations)
+                res = this._parseKingConst(ast.declarations, options)
+                break;
+            case AST.ImportDeclaration:
+                res = this._parseKingImportDeclaration(ast, options)
+                break;
+            case AST.ImportDefaultSpecifier:
+                res = this._parseKingImportDefaultSpecifier(ast, options)
+                break;
+            case AST.ImportSpecifier:
+                res = this._parseKingImportSpecifier(ast, options)
                 break;
             case AST.Identifier:
                 res = this._parseKingIdentifier(ast, options)
+                break;
+            case AST.NumericLiteral:
+                res = this._parseKingNumericLiteral(ast, options)
+                break;
+            case AST.StringLiteral:
+                res = this._parseKingStringLiteral(ast, options)
+                break;
+            case AST.ObjectProperty:
+                res = this._parseKingObjectProperty(ast, options)
                 break;
             case AST.Literal:
                 res = this._parseKingLiteral(ast, options)
@@ -169,11 +248,44 @@ class Js2Ast {
             case AST.BlockStatement:
                 res = this._parseKingBlockStatement(ast, options)
                 break;
+            case AST.IfStatement:
+                res = this._parseKingIfStatement(ast, options)
+                break;
+            case AST.ForStatement:
+                res = this._parseKingForStatement(ast, options)
+                break;
+            case AST.ForInStatement:
+                res = this._parseKingForInStatement(ast, options)
+                break;
+            case AST.ForOfStatement:
+                res = this._parseKingForOfStatement(ast, options)
+                break;
+            case AST.WhileStatement:
+                res = this._parseKingWhileStatement(ast, options)
+                break;
+            case AST.DoWhileStatement:
+                res = this._parseKingDoWhileStatement(ast, options)
+                break;
+            case AST.BreakStatement:
+                res = this._parseKingBreakStatement(ast, options)
+                break;
             case AST.UnaryExpression:
                 res = this._parseKingUnaryExpression(ast, options)
                 break;
             case AST.ObjectExpression:
                 res = this._parseKingObjectExpression(ast, options)
+                break;
+            case AST.ObjectMethod:
+                res = this._parseKingObjectMethod(ast, options)
+                break;
+            case AST.LogicalExpression:
+                res = this._parseKingLogicalExpression(ast, options)
+                break;
+            case AST.ExportDefaultDeclaration:
+                res = this._parseKingExportDefaultDeclaration(ast, options)
+                break;
+            case AST.ExportNamedDeclaration:
+                res = this._parseKingExportNamedDeclaration(ast, options)
                 break;
             case AST.ExpressionStatement:
                 res = this._parseKingExpressionStatement(ast.expression, options)
@@ -196,12 +308,78 @@ class Js2Ast {
         const ast = new LuaAst()
         declarations.forEach(declaration => {
             const constName = this._set_name('const', declaration.id.name)
-            const right = this._parseKind(declaration.init, {
-                ...options,
-                varName: constName
-            })
-            ast.push(`local ${constName}=${right}`)
+            let value = constName
+            if (declaration.init) {
+                value += '=' + this._parseKind(declaration.init, {
+                    ...options,
+                    varName: constName
+                })
+            }
+            if (options?.removeDef) {
+                ast.push(value)
+            } else {
+                ast.push(`local ${value}`)
+            }
         })
+        return ast.toString()
+    }
+
+    // import
+    _parseKingImportDeclaration (declaration, options) {
+        const ast = new LuaAst()
+
+        let moduleName = ''
+        if (declaration.source.value.endsWith('.ts')) {
+            [moduleName,] = declaration.source.value.split('.')
+        } else {
+            moduleName = declaration.source.value
+        }
+        const luaModule = moduleName.replace(/\.\//g, '').replace(/\//g, '.')
+
+        const requireTs = path.resolve(this._dest_path, declaration.source.value + '.ts')
+
+        const data = fs.readFileSync(requireTs)
+
+        const tsAst = new Ts2Ast()
+        tsAst.setDest(this._dest_path)
+        tsAst.setOutput(this._output_path)
+        tsAst.buildCode(data.toString())
+
+        const outputFile = path.resolve(this._output_path, moduleName)
+        const outputPath = path.dirname(outputFile)
+        if (! fs.existsSync(outputPath)) {
+            fs.mkdirSync(outputPath, { mode: 0o755, recursive: true })
+        }
+        fs.writeFileSync(outputFile + '.lua', tsAst.toString())
+
+        if (declaration.specifiers.length) {
+            ast.push(`__import["${luaModule}"]=require("${luaModule}")`)
+            declaration.specifiers.forEach(item => {
+                const name = '__import["' + luaModule + '"]'
+                if (item.type === AST.ImportDefaultSpecifier) {
+                    ast.push(`local ${item.local.name}=${name}.default`)
+                } else {
+                    ast.push(`local ${item.local.name}=${name}.${item.local.name}`)
+                }
+            })
+        } else {
+            ast.push(`require("${luaModule}")`)
+        }
+
+        return ast.toString()
+    }
+
+    // import default 命名
+    _parseKingImportDefaultSpecifier (declaration, options) {
+        const ast = new LuaAst()
+        ast.push(declaration.local.name)
+        return ast.toString()
+    }
+
+    // import {} 命名
+    _parseKingImportSpecifier (declaration, options) {
+        const ast = new LuaAst()
+        ast.push(declaration.local.name)
         return ast.toString()
     }
 
@@ -217,6 +395,32 @@ class Js2Ast {
         return ast.toString()
     }
 
+    // 整数
+    _parseKingNumericLiteral (declaration, options = {}) {
+        options.thisScope = options?.thisScope ?? false
+        const ast = new LuaAst()
+        ast.push(declaration.value)
+        return ast.toString()
+    }
+
+    // 字符串
+    _parseKingStringLiteral (declaration, options = {}) {
+        options.thisScope = options?.thisScope ?? false
+        const ast = new LuaAst()
+        ast.push(`"${declaration.value}"`)
+        return ast.toString()
+    }
+
+    // 对象
+    _parseKingObjectProperty (declaration, options = {}) {
+        options.thisScope = options?.thisScope ?? false
+        const ast = new LuaAst(declaration.loc)
+        const left = this._parseKind(declaration.key, options)
+        const right = this._parseKind(declaration.value, options)
+        ast.push(`["${left}"]: ${right}`)
+        return ast.toString()
+    }
+
     // 值解析
     _parseKingLiteral (declaration, options) {
         const ast = new LuaAst()
@@ -225,6 +429,9 @@ class Js2Ast {
         if (typeof declaration.value === 'number') {
             dataType = 'number'
             ast.push(declaration.value)
+        } else if (typeof declaration.value === 'boolean') {
+            dataType = 'boolean'
+            ast.push(declaration.raw)
         } else {
             ast.push(`"${declaration.value}"`)
         }
@@ -375,18 +582,20 @@ class Js2Ast {
         const methodName = options?.methodName ?? declaration.key.name
         if (methodName === '__new__') {
             ast.push(`function ${className}:${methodName}(__args)`)
-            const params = declaration.value.params.map(param => {
-                if (param.type === 'AssignmentPattern') {
-                    const varName = className + '__' + this._parseKind(param.left, { className })
-                    return `${varName}`
-                }
-                return this._parseKind(param, { className })
-            })
-            params.forEach((name, idx) => {
-                const varName = this._set_name('class_args', name)
+            if (declaration.value) {
+                const params = declaration.value.params.map(param => {
+                    if (param.type === 'AssignmentPattern') {
+                        const varName = className + '__' + this._parseKind(param.left, { className })
+                        return `${varName}`
+                    }
+                    return this._parseKind(param, { className })
+                })
+                params.forEach((name, idx) => {
+                    const varName = this._set_name('class_args', name)
 
-                ast.push(`  local ${varName}=__args[${idx + 1}]`)
-            })
+                    ast.push(`  local ${varName}=__args[${idx + 1}]`)
+                })
+            }
         } else {
             let prefix = ''
             if (declaration.kind === 'set') {
@@ -414,13 +623,15 @@ class Js2Ast {
                 })
             }
         }
-        declaration.value.body.body.forEach(statement => {
-            const res = this._parseKind(statement, {
-                ...options,
-                className: className,
+        if (declaration.value) {
+            declaration.value.body.body.forEach(statement => {
+                const res = this._parseKind(statement, {
+                    ...options,
+                    className: className,
+                })
+                ast.push(`  ${res}`)
             })
-            ast.push(`  ${res}`)
-        })
+        }
         ast.push('end')
         // const params = declaration.params.map(param => {
         //     return this._parseKind(param)
@@ -439,9 +650,14 @@ class Js2Ast {
     // 更新表达式
     _parseKingUpdateExpression (declaration, options) {
         const ast = new LuaAst()
-        let varName = this._parseKingThisDeclaration(declaration.argument.object, options)
-        const propertyName = this._parseKind(declaration.argument.property, options)
-        varName += '.' + propertyName
+        let varName = ''
+        if (declaration.argument.type === AST.Identifier) {
+            varName = this._parseKind(declaration.argument, options)
+        } else {
+            varName = this._parseKingThisDeclaration(declaration.argument.object, options)
+            const propertyName = this._parseKind(declaration.argument.property, options)
+            varName += '.' + propertyName
+        }
         if (declaration.operator === '++') {
             ast.push(`${varName}=${varName}+1`)
         } else if (declaration.operator === '--') {
@@ -517,7 +733,7 @@ class Js2Ast {
 
     // 代码块
     _parseKingBlockStatement (declaration, options) {
-        const ast = new LuaAst()
+        const ast = new LuaAst(declaration.loc)
 
         declaration.body.forEach(body => {
             ast.push(`  ${this._parseKind(body, options)}`)
@@ -525,9 +741,107 @@ class Js2Ast {
         return ast.toString()
     }
 
+    // if
+    _parseKingIfStatement (declaration, options) {
+        const ast = new LuaAst()
+        const isElse = options?.isElse ? 'elseif' : 'if'
+        if (isElse === 'elseif') {
+            options.isElse = false
+        }
+
+        const fill = declaration.test.type === 'LogicalExpression'
+        if (fill) {
+            ast.push(`${isElse} ${this._parseKind(declaration.test, options)} then`)
+        } else {
+            ast.push(`${isElse} (${this._parseKind(declaration.test, options)}) then`)
+        }
+        ast.push(this._parseKind(declaration.consequent, options))
+        if (declaration.alternate) {
+            if (declaration.alternate.type === 'IfStatement') {
+                ast.push(this._parseKingIfStatement(declaration.alternate, {
+                    ...options,
+                    isElse: true,
+                }))
+                return ast.toString()
+            } else {
+                ast.push('else')
+                ast.push(this._parseKind(declaration.alternate, {
+                    ...options,
+                    isElse: false,
+                }))
+            }
+        }
+        ast.push('end')
+        return ast.toString()
+    }
+
+    // for
+    _parseKingForStatement (declaration, options) {
+        const ast = new LuaAst(declaration.loc)
+        ast.push('do')
+        ast.push(`${this._parseKind(declaration.init, options)}`)
+        ast.push(`  while ${this._parseKind(declaration.test, options)} do`)
+        ast.push(`  ${this._parseKind(declaration.body, options)}`)
+        ast.push(`    ${this._parseKind(declaration.update, options)}`)
+        ast.push('  end')
+        ast.push('end')
+        return ast.toString()
+    }
+
+    // for in
+    _parseKingForInStatement (declaration, options) {
+        const ast = new LuaAst(declaration.loc)
+        ast.push(`for ${this._parseKind(declaration.left, {
+            ...options,
+            removeDef: true,
+        })} in pairs(${this._parseKind(declaration.right, options)}) do`)
+        ast.push(`${this._parseKind(declaration.body, options)}`)
+        ast.push('end')
+        return ast.toString()
+    }
+
+    // for of
+    _parseKingForOfStatement (declaration, options) {
+        const ast = new LuaAst(declaration.loc)
+        ast.push(`for ___,${this._parseKind(declaration.left, {
+            ...options,
+            removeDef: true,
+        })} in pairs(${this._parseKind(declaration.right, options)}) do`)
+        ast.push(`${this._parseKind(declaration.body, options)}`)
+        ast.push('end')
+        return ast.toString()
+    }
+
+    // while
+    _parseKingWhileStatement (declaration, options) {
+        const ast = new LuaAst(declaration.loc)
+        ast.push(`while ${this._parseKind(declaration.test, options)} do`)
+        ast.push(`${this._parseKind(declaration.body, options)}`)
+        ast.push('end')
+        return ast.toString()
+    }
+
+    // do while
+    _parseKingDoWhileStatement (declaration, options) {
+        const ast = new LuaAst(declaration.loc)
+        ast.push(`repeat`)
+        ast.push(`  do`)
+        ast.push(`${this._parseKind(declaration.body, options)}`)
+        ast.push(`  end`)
+        ast.push(`until not (${this._parseKind(declaration.test, options)})`)
+        return ast.toString()
+    }
+
+    // 跳出循环
+    _parseKingBreakStatement (declaration, options) {
+        const ast = new LuaAst(declaration.loc)
+        ast.push(`  break`)
+        return ast.toString()
+    }
+
     // 一元
     _parseKingUnaryExpression (declaration, options) {
-        const ast = new LuaAst()
+        const ast = new LuaAst(declaration.loc)
 
         if (declaration.prefix) {
             ast.push(`${declaration.operator}${this._parseKind(declaration.argument, options)}`)
@@ -539,12 +853,64 @@ class Js2Ast {
     _parseKingObjectExpression (declaration, options) {
         const ast = new LuaAst()
 
-        this._var_types[options.varName] = 'object'
+        if (options?.varName) {
+            this._var_types[options.varName] = 'object'
+        }
         ast.push('{')
         declaration.properties.forEach(item => {
             ast.push(this._parseKind(item, { ...options, computed: item.computed, varName: undefined }) + ",")
         })
         ast.push('}')
+        return ast.toString()
+    }
+
+    // 对象方法
+    _parseKingObjectMethod (declaration, options) {
+        const ast = new LuaAst()
+
+        ast.push(`["${this._parseKind(declaration.key, options)}"]=function ()`)
+        ast.push(`${this._parseKind(declaration.body, options)}`)
+        ast.push('end')
+        return ast.toString()
+    }
+
+    // 逻辑运算
+    _parseKingLogicalExpression (declaration, options) {
+        const ast = new LuaAst()
+
+        let operator = ''
+        switch (declaration.operator) {
+            case '&&':
+                operator = ' and '
+                break;
+            case '||':
+                operator = ' or '
+                break;
+            default:
+                operator = declaration.operator
+                break;
+        }
+        ast.push(`(${this._parseKind(declaration.left, options)}${operator}${this._parseKind(declaration.right, options)})`)
+        return ast.toString()
+    }
+
+    // 导出
+    _parseKingExportDefaultDeclaration (expression, options) {
+        const ast = new LuaAst()
+        ast.push('local __export = {}')
+        ast.push(`__export.default=${this._parseKind(expression.declaration, options)}`)
+        ast.push('return __export')
+        return ast.toString()
+    }
+
+    // 导出无命名
+    _parseKingExportNamedDeclaration (expression, options) {
+        const ast = new LuaAst()
+        ast.push('local __export = {}')
+        expression.declaration.declarations.forEach(item => {
+            ast.push(`__export.${item.id.name}=${this._parseKind(item.init, options)}`)
+        })
+        ast.push('return __export')
         return ast.toString()
     }
 
@@ -595,16 +961,46 @@ class Js2Ast {
 
     toString () {
         this.luaAST.addStart('package.path="?.lua;.\\\\?.lua;.\\\\lua_lib\\\\\?.lua;" .. package.path')
+        this.luaAST.addStart('local __import = {}')
         if (this._use_class) {
             this.luaAST.loadLib('lua_objects', '__Objects')
         }
         this.luaAST.loadLib('lua_array')
         this.luaAST.loadLib('lua_console')
+        this.luaAST.load('up')
         return this.luaAST.toString()
+    }
+
+    static build (dest, output) {
+        const data = fs.readFileSync(dest)
+
+        const ast = new Ts2Ast()
+        const dir = path.dirname(output)
+        ast.setDest(path.dirname(dest))
+        ast.setOutput(dir)
+        ast.buildCode(data.toString())
+        if (! fs.existsSync(dir)) {
+            fs.mkdirSync(dir, { mode: 0o755 })
+        }
+        fs.writeFileSync(output, ast.toString())
+        // 复制lua_lib
+        fs.cpSync(path.resolve(__dirname, 'lua_lib'), path.resolve(dir, 'lua_lib'), { recursive: true })
     }
 }
 
-fs.readFile(path.resolve(__dirname, 'example/app.js'), (err, data) => {
-    const ast = new Js2Ast(data.toString())
-    fs.writeFileSync(path.resolve(__dirname, 'output.lua'), ast.toString())
+const content = fs.readFileSync(path.resolve(process.cwd(), '.build.json'))
+if (! content) {
+    return
+}
+const config = JSON.parse(content)
+watch.watchTree(config.dest, (f, curr, prev) => {
+    const date = new Date()
+    const dateStr = date.getFullYear() + '-' + date.getMonth() + '-' + date.getDate()
+        + ' ' + date.getHours() + ':' + date.getMinutes() + ':' + date.getSeconds()
+
+    console.log(dateStr + '' + '----build----[' + config.output + ']')
+    Ts2Ast.build(path.resolve(config.dest, 'main.ts'), path.resolve(config.output, 'main.lua'))
 })
+// console.log('p', process.argv)
+//
+// Ts2Ast.build(path.resolve(__dirname, 'src/main.ts'), path.resolve(__dirname, 'dist/main.lua'))
